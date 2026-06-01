@@ -1,0 +1,32 @@
+[project]
+name = "glm-5-1-mlperf"
+version = "1.0.0"
+description = "MLPerf Inference GLM-5.1 Reference Implementation with OpenAI-compatible backend"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=1.0.0",
+    "httpx>=0.25.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "tqdm>=4.65.0",
+    "diskcache>=5.0.0",
+    "orjson>=3.9.0",
+    "matplotlib>=3.7.0",
+    "cryptography>=41.0.0",
+]
+
+[project.optional-dependencies]
+mlperf = [
+    "mlcommons-loadgen",
+    "pybind11",
+]
+tokenizer = [
+    "transformers>=4.36.0",
+    "jinja2>=3.0.0",
+]
+
+[tool.uv.sources]
+mlcommons-loadgen = { path = "../../loadgen" }
+
+[tool.setuptools.packages.find]
+include = ["backends*", "mlperf*", "utils*"]
