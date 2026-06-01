@@ -1,0 +1,24 @@
+# Virtual environment
+.venv*/
+.venv_*/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# MLPerf results
+mlperf_results/
+outputs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

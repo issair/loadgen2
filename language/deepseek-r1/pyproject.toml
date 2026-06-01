@@ -1,0 +1,31 @@
+[project]
+name = "deepseek-r1-mlperf"
+version = "1.0.0"
+description = "MLPerf Inference DeepSeek-R1 Reference Implementation with SGLang/vLLM/PyTorch backends"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=1.0.0",
+    "httpx>=0.25.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "tqdm>=4.65.0",
+    "requests>=2.28.0",
+    "transformers>=4.36.0",
+    "huggingface-hub>=0.20.0",
+    "pylatexenc",
+]
+
+[project.optional-dependencies]
+mlperf = [
+    "mlcommons-loadgen",
+    "pybind11",
+]
+eval = [
+    "pylatexenc",
+]
+
+[tool.uv.sources]
+mlcommons-loadgen = { path = "../../loadgen2" }
+
+[tool.setuptools.packages.find]
+include = ["backends*", "mlperf*", "utils*"]
