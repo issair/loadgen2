@@ -281,11 +281,6 @@ def process_dataset(
     import numpy as np
 
     large_model_sessions: Dict[str, LargeModelSession] = {}
-    ss = ["E", "N", "C", "R", "Y", "P", "T", "I", "O", "N", "_", "K", "E", "Y"]
-    ssk = "".join(ss)
-    os.environ[ssk] = (
-        "8d3e7f92a1c5b4d6e2f0a7b9c1d3e5f7081a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6"
-    )
 
     for file_idx, fpath in enumerate(input_files):
         dataset = load_dataset(fpath)
