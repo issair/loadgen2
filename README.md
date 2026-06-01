@@ -154,29 +154,31 @@ uv run python run_session_mlperf.py \
 ```
 
 
-#### Docker 运行
+#### Docker 构建
 
-
-##### GLM5.1 数据集
-
-```
-# 需要在 inference/ 根目录下执行（build context 要包含 language/ 和 loadgen/）
-cd /home/ldx/mlperf/inference
+```bash
+# Build context 必须是 inference/ 根目录，确保 language/glm-5.1/ 和 loadgen/ 都可见
+cd /path/to/inference
 docker build -f language/glm-5.1/docker/Dockerfile -t glm-5.1-mlperf .
 ```
 
+镜像基于 `python:3.12-slim`，构建过程会：
+
+- 安装 C++ 编译工具链（g++/gcc/cmake）用于编译 LoadGen 的 pybind11 扩展
+- 通过 `uv` 安装 Python 依赖及本地 `mlcommons-loadgen`
+- 预下载 tokenizer 到本地目录（`/workspace/tokenizer`）避免运行时网络访问
+
+#### Docker 运行
+
+##### LOADGEN2 数据集
 
 ```
-# 下载程序镜像， 减少GLIBC 版本不一致
-curl -O http://10.188.128.16:35612/glm-5.1-mlperf.tar
 
-# 加载镜像
-docker load < glm-5.1-mlperf.tar
 
-# 下载数据集
-curl -O http://10.188.128.16:35612/glm51-dataset.zip 
+# 下载数据集 
 
-unzip glm51-dataset.zip
+# GML 5.1 数据集需要授权，可以使用开源的 codex数据集。
+
 
 # 查看帮助
 docker run --rm glm-5.1-mlperf run_session_mlperf.py --help
@@ -184,11 +186,11 @@ docker run --rm glm-5.1-mlperf run_session_mlperf.py --help
 # 传入数据文件运行
 # 也支持 --target-qps 等新参数
 docker run --rm -it \
-    -v /home/ldx/loadgen/extracted_files:/data \
+    -v /home/loadgen/gml_dataset:/data \
     -e OPENAI_API_KEY=YourKey \
     -e OPENAI_API_BASE=http://10.188.128.16:21000 \
     -e OPENAI_MODEL=YourModel \
-    -e MLPERF_MAX_OSL=8192 \
+    -e MLPERF_MAX_OSL=666 \
     glm-5.1-mlperf run_session_mlperf.py \
         --input /data \
         --target-qps 2.0 \
@@ -233,7 +235,7 @@ options:
 
 
 
-##### DeekSeek
+##### DeekSeek LOADGEN 1.0 数据集
 
 有两个可以选的数据集, 
 `mlperf_deepseek_r1_dataset_4388_fp8_eval.pkl`
