@@ -22,16 +22,10 @@ export OPENAI_API_BASE="http://localhost:21000"
 export OPENAI_API_KEY="Mock-Model"
 export OPENAI_MODEL="Mock-Model"
 
-# export OPENAI_API_BASE="http://10.188.128.12:30100/api/ai-gateway/v1"
-# export OPENAI_API_BASE="https://api.deepseek.com/v1"
-# export OPENAI_API_BASE="http://120.52.65.181:5000/v1"
 export OPENAI_API_BASE="http://127.0.0.1:21000/v1"
 export OPENAI_API_KEY="Your-Key"
 export OPENAI_MODEL="Mock-Model"
 export MLPERF_MAX_OSL=66
-# LLM_MODEL=deepseek-chat
-# LLM_BINDING_HOST=https://api.deepseek.com
-# export MLPERF_MAX_OSL=2
 
 # mlperf_loadgen C++ extension requires GLIBCXX_3.4.30+
 MLPERF_CONF="../../mlperf.conf"
@@ -81,7 +75,7 @@ set -- \
     --poisson-lam "$POISSON_LAM" \
     --poisson-seed "$POISSON_SEED" \
     --time-unit "$TIME_UNIT" \
-    --mlperf-conf "$MLPERF_CONF" 
+    --mlperf-conf "$MLPERF_CONF"
 
 if [ -n "$USER_CONF" ] && [ -f "$USER_CONF" ]; then
     set -- "$@" --user-conf "$USER_CONF"

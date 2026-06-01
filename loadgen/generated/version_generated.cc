@@ -10,32 +10,33 @@ const std::string& LoadgenVersion() {
 }
 
 const std::string& LoadgenBuildDateLocal() {
-  static const std::string str = "2026-06-01T16:18:07.844681";
+  static const std::string str = "2026-06-01T16:50:11.599027";
   return str;
 }
 
 const std::string& LoadgenBuildDateUtc() {
-  static const std::string str = "2026-06-01T08:18:07.844681";
+  static const std::string str = "2026-06-01T08:50:11.599027";
   return str;
 }
 
 const std::string& LoadgenGitRevision() {
-  static const std::string str = "2cc1f9a3af";
+  static const std::string str = "1f30151fd7";
   return str;
 }
 
 const std::string& LoadgenGitCommitDate() {
-  static const std::string str = "2026-06-01T15:17:58+08:00";
+  static const std::string str = "2026-06-01T16:22:44+08:00";
   return str;
 }
 
 const std::string& LoadgenGitStatus() {
-  static const std::string str = R"LGVG_RSLD()LGVG_RSLD";
+  static const std::string str = R"LGVG_RSLD( M generated/version_generated.cc)LGVG_RSLD";
   return str;
 }
 
 const std::string& LoadgenGitLog() {
-  static const std::string str = R"LGVG_RSLD(2cc1f9a3afc69e662b9c28e8a064a828bb18698c Initial commit)LGVG_RSLD";
+  static const std::string str = R"LGVG_RSLD(1f30151fd76914abcb93209dca17631e17489067 init project
+2cc1f9a3afc69e662b9c28e8a064a828bb18698c Initial commit)LGVG_RSLD";
   return str;
 }
 
