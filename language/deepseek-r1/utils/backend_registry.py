@@ -91,7 +91,7 @@ BACKEND_REGISTRY = {
         "config": {
             "model": "deepseek-ai/DeepSeek-R1",
             "model_revision": MODEL_REVISION,
-            "served_model_name": "deepseek-r1",
+            "served_model_name": os.environ.get("OPENAI_MODEL", None),
             "tokenizer": "deepseek-ai/DeepSeek-R1",
             "host": "0.0.0.0",
             "api_key": None,

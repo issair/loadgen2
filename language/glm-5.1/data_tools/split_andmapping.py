@@ -76,7 +76,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Iterator, List
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from transformers import JinaEmbeddingsV3Config
+from matplotlib.pyplot import _REPL_DISPLAYHOOK
 
 logger = logging.getLogger(__name__)
 
@@ -152,14 +152,49 @@ def split_conversation_for_loadgen(
 # ---------------------------------------------------------------------------
 
 
+def _parse_json_or_jsonl(text: str) -> List[Dict[str, Any]]:
+    """Parse *text* as either a JSON document (object / array) or JSONL.
+
+    Tries ``json.loads`` first; if that raises ``JSONDecodeError``, falls
+    back to parsing the text line-by-line as JSONL.
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return _parse_jsonl(text)
+
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return data
+    raise ValueError(f"Unsupported JSON format: {type(data)}")
+
+
+def _parse_jsonl(text: str) -> List[Dict[str, Any]]:
+    """Parse *text* as JSONL – one JSON value per line."""
+    results: List[Dict[str, Any]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        results.append(json.loads(stripped))
+    return results
+
+
 def load_dataset(
     input_path: str, encryption_key: str | None = None
 ) -> List[Dict[str, Any]]:
-    """Load a JSON file (single object or array) into a list of dicts.
+    """Load a JSON / JSONL file into a list of dicts.
+
+    Supports three formats:
+
+    - A single JSON object  → returns ``[obj]``
+    - A JSON array          → returns the array as-is
+    - JSONL (one JSON value per line) → returns a list of parsed dicts
 
     If ``encryption_key`` is provided or the ``ENCRYPTION_KEY`` environment
     variable is set, the file will be decrypted with AES-256-GCM before
-    parsing.  Otherwise the file is read as plain JSON.
+    parsing.  Otherwise the file is read as plain text.
     """
     key = encryption_key or os.environ.get("ENCRYPTION_KEY")
 
@@ -167,18 +202,14 @@ def load_dataset(
         try:
             return _load_encrypted_dataset(input_path, key)
         except Exception:
-            logger.warning(
+            logger.exception(
                 "AES decryption failed for %s, falling back to plain-text.",
                 input_path,
             )
 
     with open(input_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if isinstance(data, dict):
-        return [data]
-    if isinstance(data, list):
-        return data
-    raise ValueError(f"Unsupported JSON format: {type(data)}")
+        text = f.read()
+    return _parse_json_or_jsonl(text)
 
 
 def _derive_key(key_str: str) -> bytes:
@@ -208,13 +239,7 @@ def _load_encrypted_dataset(input_path: str, key_str: str) -> List[Dict[str, Any
         ciphertext = f.read()  # ciphertext || 16-byte tag
 
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-    data = json.loads(plaintext.decode("utf-8"))
-
-    if isinstance(data, dict):
-        return [data]
-    if isinstance(data, list):
-        return data
-    raise ValueError(f"Unsupported JSON format: {type(data)}")
+    return _parse_json_or_jsonl(plaintext.decode("utf-8"))
 
 
 def discover_input_files(path: str) -> List[str]:
@@ -285,7 +310,13 @@ def process_dataset(
     for file_idx, fpath in enumerate(input_files):
         dataset = load_dataset(fpath)
 
-        for conv in dataset:
+        if len(dataset) > 1:
+            # 这个 json 里面是完整的 replay 的请求，不需要自己拆分
+            large_model_sessions[fpath] = RaplayLargeModelSession(
+                snap_shot=dataset,
+            )
+        else:
+            conv = dataset[0]
             requests = split_conversation_for_loadgen(conv, fpath)
 
             # ── Build LargeModelSession for this conversation ──────────
@@ -314,11 +345,6 @@ def process_dataset(
                 flush=True,
             )
     return large_model_sessions
-
-
-# ---------------------------------------------------------------------------
-# Large Model Session
-# ---------------------------------------------------------------------------
 
 
 class LargeModelSession:
@@ -438,13 +464,6 @@ class LargeModelSession:
                 return wait_time, rel_indx
 
         # All requests have been executed
-        # logger.warning(
-        #     "next_execute_request: all executed! "
-        #     "user_conv_request=%s, executed_time=%s, ps_delta=%s",
-        #     self.user_conv_request,
-        #     self.executed_time,
-        #     self.user_conv_ps_delta,
-        # )
         return 0, -1
 
     def end_request(
@@ -501,9 +520,9 @@ class LargeModelSession:
 
         # If full_reset is requested, reset all turns so the session can
         # be retried from the very beginning.
-        if full_reset:
+        if full_reset and all_done:
             for i in range(len(self.executed_time)):
-                self.executed_time[i] = end_time_sec
+                self.executed_time[i] = 0
             logger.debug(
                 "end_request: full_reset — all %d turns reset for %s",
                 len(self.executed_time),
@@ -511,8 +530,6 @@ class LargeModelSession:
             )
             return True
         elif all_done:
-            # for i in range(len(self.executed_time)):
-            # self.executed_time[i] = 0.0
             logger.debug(
                 "end_request: all %d turns executed — resetting executed_time",
                 len(self.executed_time),
@@ -526,7 +543,7 @@ class LargeModelSession:
         """
         Yield all request slices from position *pos* up to the next user request.
 
-        Starting from *pos* (returned by :meth:`next_execute_request`),
+        Starting from *pos* (index into ``user_conv_request``),
         yields every request slice — user, tool, and assistant messages —
         up to, but **not including**, the next user-ending request.
         If *pos* is the last user request, yields through the end
@@ -534,9 +551,9 @@ class LargeModelSession:
 
         When *go_to_end* is ``True``, the iterator does **not** stop at the
         next user boundary but continues all the way to the end of the
-        conversation.  Between consecutive user turns (the Poisson-interval
-        boundaries), the generator sleeps for the corresponding
-        Poisson-distributed interval stored in ``user_conv_ps_delta``.
+        conversation.  Between consecutive user turns, the generator
+        sleeps for the corresponding Poisson-distributed interval
+        stored in ``user_conv_ps_delta``.
 
         Each yielded dict has the same shape as the output of
         :func:`split_conversation_for_loadgen`:
@@ -546,7 +563,7 @@ class LargeModelSession:
         Parameters
         ----------
         pos : int
-            Position into ``user_conv_request`` (from ``next_execute_request``).
+            Position into ``user_conv_request``.
         go_to_end : bool
             If ``True``, iterate through the entire remaining conversation
             instead of stopping at the next user boundary, sleeping for
@@ -578,6 +595,13 @@ class LargeModelSession:
         # When go_to_end, track the next user boundary for Poisson sleeps.
         next_user_pos = pos + 1
 
+        # Pre-occupy all remaining user-turn positions so other workers
+        # won't pick them up — this single turn processes everything.
+        if go_to_end:
+            for i in range(pos + 1, len(self.user_conv_request)):
+                if self.executed_time[i] == 0.0:
+                    self.executed_time[i] = 9999999999999
+
         for local_idx in range(start_local, stop_local):
             # In go_to_end mode, sleep at each user-turn boundary.
             if (
@@ -588,7 +612,7 @@ class LargeModelSession:
                 ps_sec = self._ps_delta_to_seconds(
                     self.user_conv_ps_delta[next_user_pos]
                 )
-                logger.debug(
+                logger.info(
                     "iter_requests_until_next_user: sleeping %.3f s "
                     "at user boundary pos=%d (ps_delta=%d)",
                     ps_sec,
@@ -606,6 +630,109 @@ class LargeModelSession:
                 "last_role": chunk[-1]["role"] if chunk else "",
                 "end_at": end_at,
             }
+
+
+# ---------------------------------------------------------------------------
+# Replay Large Model Session (inherits LargeModelSession)
+# ---------------------------------------------------------------------------
+class RaplayLargeModelSession(LargeModelSession):
+    """
+    大模型会话（replay 模式）
+
+    继承 LargeModelSession，用于已拆分好的 replay 请求数据。
+    snap_shot 是 ``list[dict]``（每个 dict 是一个请求切片），
+    user_conv_request 从数据中自动计算。
+    """
+
+    def __init__(
+        self,
+        snap_shot: list[dict],  # 每个是一个请求
+        executed_time: list[float] | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        import copy
+        snap_shot = copy.deepcopy(snap_shot)
+
+        # 为每个请求加上 prefix
+        if prefix:
+            for req in snap_shot:
+                messages = req.get("messages", [])
+                if messages:
+                    messages[0]["content"] = prefix + messages[0]["content"]
+                tools = req.get("tools", [])
+                if tools and tools[0].get("function", {}).get("description"):
+                    tools[0]["function"]["description"] = (
+                        prefix + tools[0]["function"]["description"]
+                    )
+
+        # 找出所有 messages 最后一条 role == "user" 的请求在 snap_shot 中的索引位置
+        _user_conv_request: list[int] = [
+            i for i, req in enumerate(snap_shot)
+            if req["messages"][-1]["role"] == "user"
+        ]
+        super().__init__(
+            snap_shot=snap_shot,  # type: ignore[arg-type]  # replay 模式用 list
+            all_conv_request=[],
+            user_conv_request=_user_conv_request,
+            user_conv_ps_delta=[],
+        )
+        self.next_request_index = 0
+        self._pos_occupied = False
+
+    def next_execute_request(self, now_sec: float) -> tuple[int, int]:
+        """Replay 模式：顺序分发，零等待。
+
+        如果已有 pos 被分配但未完成（_pos_occupied=True），
+        返回 -1 阻止其他 worker 获取。
+        """
+        logger.debug(
+            "next_execute_request: now_sec=%.3f, user_conv_request=%s",
+            now_sec,
+            self.user_conv_request,
+        )
+        if self._pos_occupied:  
+            return 0, -1
+        if self.next_request_index < len(self.user_conv_request):
+            pos = self.next_request_index
+            self.next_request_index += 1
+            self._pos_occupied = True
+            return 0, pos
+        return 0, -1
+
+    def end_request(
+        self, pos: int, end_time_sec: float, sid: str, full_reset: bool = False
+    ) -> bool:
+        """Replay 模式：释放 _pos_occupied 标记，判断是否全部完成。"""
+        self._pos_occupied = False
+        all_done = self.next_request_index >= len(self.user_conv_request)
+        if full_reset and all_done:
+            self.next_request_index = 0
+            return True
+        return all_done
+
+    async def iter_requests_until_next_user(
+        self, pos: int, go_to_end: bool = False
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Replay 模式：直接产出 snap_shot 中已有的请求切片。
+
+        When *go_to_end* is ``True``, yield all remaining requests
+        through the end of the conversation.
+        """
+        if pos < 0 or pos >= len(self.user_conv_request):
+            return
+
+        start_local = self.user_conv_request[pos]
+        if go_to_end:
+            stop_local = len(self.snap_shot)
+            # Pre-occupy all remaining positions — this turn processes everything.
+            self.next_request_index = len(self.user_conv_request)
+        elif pos + 1 < len(self.user_conv_request):
+            stop_local = self.user_conv_request[pos + 1]
+        else:
+            stop_local = len(self.snap_shot)
+
+        for local_idx in range(start_local, stop_local):
+            yield self.snap_shot[local_idx]
 
 
 # ---------------------------------------------------------------------------

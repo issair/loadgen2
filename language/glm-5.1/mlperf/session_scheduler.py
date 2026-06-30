@@ -68,6 +68,8 @@ class SessionScheduler:
         poisson_seed: int = 0,
         poisson_lam: int = 10,
         poisson_pool_size: int = 1000,
+        round_from: int = 0,
+        round_to: int = 1,
     ) -> None:
         self.sessions = sessions
         self.backend = backend
@@ -78,6 +80,9 @@ class SessionScheduler:
         self._poisson_seed = poisson_seed
         self._poisson_lam = poisson_lam
         self._poisson_pool_size = poisson_pool_size
+        self._round_from = round_from
+        self._round_to = round_to
+        self._early_term_k = float(os.getenv("EARLY_TERM_K", "1.0"))  # 0.0-1.0
 
         # Global RNG — each worker generates its own pool from it.
         self._rng = np.random.default_rng(seed=poisson_seed)
@@ -101,7 +106,8 @@ class SessionScheduler:
         self._sample_pool: asyncio.Queue[lg.QuerySample] = asyncio.Queue()
 
         # Total progress tracking.
-        self._total_turns = sum(len(s.user_conv_request) for s in sessions.values())
+        rounds = round_to - round_from
+        self._total_turns = sum(len(s.user_conv_request) for s in sessions.values()) * rounds
         self._completed_turns = 0
         self._session_turns: Dict[str, int] = {sid: 0 for sid in sessions}
         self._turns_lock = asyncio.Lock()
@@ -109,6 +115,9 @@ class SessionScheduler:
         # Session completion tracking (for early termination).
         self._completed_sessions: int = 0
         self._total_sessions: int = len(sessions)
+
+        # Per-session round tracking.
+        self._session_rounds: Dict[str, int] = {sid: round_from for sid in sessions}
 
         # Set when all turns have completed.
         self._done_event = asyncio.Event()
@@ -319,21 +328,19 @@ class SessionScheduler:
                     break
             else:
                 # No session has a ready request — back off briefly.
-                # logger.info(f"Worker-{worker_id} | all wait it, wait_time {wait_time}")
                 await asyncio.sleep(0.01)
                 return False
 
-        logger.info(f"Trigger-{worker_id:02d} | {sid} | turn pos={pos}")
+        # Determine the current round for this session.
+        round_num = self._session_rounds[sid]
+
+        logger.info(f"Trigger-{worker_id:02d} | {sid} | turn pos={pos} round={round_num}")
 
         chain_start = time.perf_counter()
 
         request_in_chain = 0
-        errored = False
-        turns = 1
         try:
-            async for req_dict in session.iter_requests_until_next_user(
-                pos, go_to_end=self.go_to_end
-            ):
+            async for req_dict in session.iter_requests_until_next_user(pos, go_to_end=self.go_to_end):
                 end_at = req_dict.get("end_at", -1)
                 role = req_dict.get("last_role", "unkown")
 
@@ -342,7 +349,6 @@ class SessionScheduler:
                 # (same pool as the worker-level delay between turns).
                 if request_in_chain > 0 and role == "user":
                     delay = await anext(poisson_iter)
-                    turns = turns + 1
                     await asyncio.sleep(self._to_seconds(delay))
 
                 if self._done_event.is_set():
@@ -366,7 +372,7 @@ class SessionScheduler:
                     start_time=time.perf_counter(),
                 )
 
-                result = await self._stream_single_request(sid, prompt_str)
+                result = await self._stream_single_request(sid, prompt_str, round_num)
 
                 if result is None:
                     raise RuntimeError(
@@ -391,10 +397,13 @@ class SessionScheduler:
             logger.exception(f"Trigger-{worker_id:02d} | {sid} | FAIL pos={pos}, {e}")
         finally:
             # Always mark the turn as ended, regardless of success/error.
-            # When go_to_end is set, reset the session to the beginning.
+            # When there are more rounds, reset the session.
+            should_reset = (round_num + 1 < self._round_to)
             session_all_done = session.end_request(
-                pos, time.time(), sid, full_reset=self.go_to_end
+                pos, time.time(), sid, full_reset=should_reset
             )
+            if session_all_done and should_reset:
+                self._session_rounds[sid] = round_num + 1
 
         chain_elapsed_s = time.perf_counter() - chain_start
 
@@ -402,10 +411,11 @@ class SessionScheduler:
             self._completed_turns += 1
             self._session_turns[sid] += 1
 
-            # Count completed sessions — a session is done when all its
-            # requests have been executed (as reported by end_request).
+            # Count completed sessions — only when permanently done
+            # (no more rounds to reset for).
             if session_all_done:
-                self._completed_sessions += 1
+                if round_num + 1 >= self._round_to:
+                    self._completed_sessions += 1
 
             done = self._completed_turns
             session_done = self._session_turns[sid]
@@ -416,7 +426,7 @@ class SessionScheduler:
             # early — the remaining turns belong to sessions already inflight
             # and will be drained naturally.
             remaining_sessions = self._total_sessions - sessions_done
-            if remaining_sessions < self.num_triggers and not self._done_event.is_set():
+            if remaining_sessions < self.num_triggers * self._early_term_k and not self._done_event.is_set():
                 logger.warning(
                     f"Early done: remaining sessions ({remaining_sessions}) "
                     f"< triggers ({self.num_triggers}), "
@@ -442,7 +452,7 @@ class SessionScheduler:
     # ------------------------------------------------------------------
 
     async def _stream_single_request(
-        self, sid: str, prompt_str: str
+        self, sid: str, prompt_str: str, round_num: int
     ) -> Optional[StreamResult]:
         """Stream a single request through a **child process**.
 
@@ -455,6 +465,8 @@ class SessionScheduler:
             _stream_worker,
             prompt_str,
             self._stream_pool.backend_name,
+            round_num,
+            sid,
         )
 
         if result is not None:

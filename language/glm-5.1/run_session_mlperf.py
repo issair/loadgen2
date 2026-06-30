@@ -34,7 +34,11 @@ from typing import Dict, List, Optional
 
 import mlperf_loadgen as lg
 
-from data_tools.split_andmapping import LargeModelSession, process_dataset
+from data_tools.split_andmapping import (
+    LargeModelSession,
+    RaplayLargeModelSession,
+    process_dataset,
+)
 from mlperf.session_sut import SessionSUT
 from utils import get_backend_instance
 
@@ -159,6 +163,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=10.0,
         help="Time interval in seconds for input-token timeline plot (default 5.0)",
+    )
+    p.add_argument(
+        "--round-from",
+        type=int,
+        default=0,
+        help="Starting round index (default 0)",
+    )
+    p.add_argument(
+        "--round-to",
+        type=int,
+        default=1,
+        help="Ending round index, exclusive (default 1)",
     )
     return p
 
@@ -765,12 +781,13 @@ def _print_args(args: argparse.Namespace) -> None:
         ("Input data path", args.input),
         ("Output directory", args.output_dir),
         ("Max concurrent triggers", args.max_trigger),
-        ("Max traces", args.max_trace),
+        ("Max traces", args.max_trace or 0),
         ("Poisson lambda", args.poisson_lam),
         ("Time unit", args.time_unit),
         ("Poisson seed", args.poisson_seed),
         ("Min query count", args.min_query_count),
         ("Go to end", args.go_to_end),
+        ("Round range", f"{args.round_from} → {args.round_to}"),
     ]
 
     STAT_LABEL_WIDTH = 24
@@ -810,6 +827,26 @@ def main() -> None:
         sessions = {k: sessions[k] for k in keys}
         logger.info(f"Truncated to {args.max_trace} traces (--max-trace)")
 
+    # 当 max_trace 大于 sessions 数的时候。
+    # 并且是  session 是的 RaplayLargeModelSession
+    # 复制到至少 max_trace
+    if args.max_trace is not None and args.max_trace > len(sessions):
+        first_session = next(iter(sessions.values()))
+        if isinstance(first_session, RaplayLargeModelSession):
+            snap_shot_data = first_session.snap_shot
+            sessions = {}
+            for i in range(args.max_trace):
+                sid = f"replay_{i:04d}"
+                sessions[sid] = RaplayLargeModelSession(
+                    snap_shot=snap_shot_data,
+                    prefix=f"sid_{i} ",
+                )
+            logger.info(
+                "Rebuilt %d RaplayLargeModelSession(s) from first_session to match max_trace=%d",
+                len(sessions),
+                args.max_trace,
+            )
+
     total_turns = sum(len(s.user_conv_request) for s in sessions.values())
     total_requests = sum(len(s.all_conv_request) for s in sessions.values())
     logger.info(
@@ -841,6 +878,8 @@ def main() -> None:
             poisson_seed=args.poisson_seed,
             poisson_lam=args.poisson_lam,
             poisson_pool_size=args.poisson_pool_size,
+            round_from=args.round_from,
+            round_to=args.round_to,
         )
 
         # --- 5. Settings & logs -----------------------------------------
@@ -864,6 +903,21 @@ def main() -> None:
 
         log_dir = Path(args.output_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
+
+        # httpcore DEBUG 日志单独输出到文件，便于观察 TCP 连接建立过程
+        _httpcore_logger = logging.getLogger("httpcore")
+        _httpcore_logger.setLevel(logging.DEBUG)
+        _httpcore_handler = logging.FileHandler(
+            log_dir / "httpcore.log", encoding="utf-8"
+        )
+        _httpcore_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
+        _httpcore_logger.addHandler(_httpcore_handler)
+        _httpcore_logger.propagate = False
         log_settings = lg.LogSettings()
         log_settings.log_output.outdir = str(log_dir)
         log_settings.log_output.copy_summary_to_stdout = False
@@ -911,4 +965,5 @@ if __name__ == "__main__":
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
     main()

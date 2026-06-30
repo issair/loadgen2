@@ -105,6 +105,12 @@ def create_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override *.{scenario}.min_query_count",
     )
+    parser.add_argument(
+        "--performance-sample-count",
+        type=int,
+        default=None,
+        help="Override *.*.performance_sample_count_override",
+    )
 
     parser.add_argument(
         "--accuracy",

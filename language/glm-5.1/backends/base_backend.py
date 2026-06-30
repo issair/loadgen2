@@ -81,6 +81,7 @@ class BaseBackend(ABC):
         self,
         tokenized_prompts: Optional[List[List[int]]] = None,
         text_prompts: Optional[List[str]] = None,
+        sid: Optional[str] = None,
         **kwargs,
     ) -> List[AsyncIterator[StreamingChunk]]:
         """

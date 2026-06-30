@@ -20,6 +20,8 @@ Usage inside :class:`SessionScheduler`::
         _stream_worker,
         prompt_str,
         self._stream_pool.backend_name,
+        round_num,
+        sid,
     )
 """
 
@@ -104,7 +106,7 @@ def _pool_initializer(backend_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _stream_worker(prompt_str: str, backend_name: str) -> Optional[StreamResult]:
+def _stream_worker(prompt_str: str, backend_name: str, round_num: int, sid: str) -> Optional[StreamResult]:
     """Run a single streaming request inside a child process.
 
     Uses the persistent event loop created by :func:`_pool_initializer`,
@@ -117,6 +119,10 @@ def _stream_worker(prompt_str: str, backend_name: str) -> Optional[StreamResult]
         JSON-encoded request payload.
     backend_name : str
         Backend registry key (unused; present for signature compatibility).
+    round_num : int
+        Current round number, prepended to the first message content.
+    sid : str
+        Session id for logging/tracing.
 
     Returns
     -------
@@ -125,20 +131,35 @@ def _stream_worker(prompt_str: str, backend_name: str) -> Optional[StreamResult]
     """
     asyncio.set_event_loop(_worker_loop)
     return _worker_loop.run_until_complete(
-        _async_stream_one(_worker_backend, prompt_str)
+        _async_stream_one(_worker_backend, prompt_str, round_num, sid)
     )
 
 
-async def _async_stream_one(backend, prompt_str: str) -> Optional[StreamResult]:
+async def _async_stream_one(backend, prompt_str: str, round_num: int, sid: str) -> Optional[StreamResult]:
     """Async body executed inside the child process's temporary event loop.
+
+    Prepends ``r{round_num}`` to the first message's content, then streams.
 
     Returns :class:`StreamResult` on success, or ``None`` if an error
     occurred during streaming.
     """
     try:
+        # Parse, inject round marker, re-serialize.
+        import json
+        req = json.loads(prompt_str)
+        messages = req.get("messages", [])
+        if messages:
+            messages[0]["content"] = f"r{round_num} " + messages[0]["content"]
+        tools = req.get("tools", [])
+        if tools and tools[0].get("function", {}).get("description"):
+            tools[0]["function"]["description"] = (
+                f"r{round_num} " + tools[0]["function"]["description"]
+            )
+        prompt_str = json.dumps(req, ensure_ascii=False)
+
         start_time = time.perf_counter()
 
-        stream_gens = await backend.generate_stream(text_prompts=[prompt_str])
+        stream_gens = await backend.generate_stream(text_prompts=[prompt_str], sid=sid)
         stream_gen = stream_gens[0]
 
         first_chunk: Optional[StreamingChunk] = None
@@ -167,7 +188,7 @@ async def _async_stream_one(backend, prompt_str: str) -> Optional[StreamResult]:
             accumulated_text="".join(accumulated_text_parts),
         )
     except Exception as e:
-        logger.exception(f"_async_stream_one | streaming failed: {e}")
+        logger.exception(f"_async_stream_one | sid={sid} | streaming failed: {e}")
         return None
 
 
@@ -231,7 +252,7 @@ class StreamProcessPool:
 
     # -- submission ----------------------------------------------------------
 
-    def submit(self, prompt_str: str) -> Future:
+    def submit(self, prompt_str: str, sid: str, round_num: int) -> Future:
         """Submit one prompt and return a :class:`~concurrent.futures.Future`.
 
         The future resolves to a :class:`StreamResult`.
@@ -240,6 +261,8 @@ class StreamProcessPool:
             _stream_worker,
             prompt_str,
             self.backend_name,
+            round_num,
+            sid,
         )
 
     # -- context manager -----------------------------------------------------

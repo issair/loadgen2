@@ -274,7 +274,6 @@ class SGLangBackend(BaseBackend):
                                 model=self.config["served_model_name"],
                                 messages=[{"role": "user", "content": "Hello"}],
                                 temperature=0.0,
-                                max_tokens=10,
                                 seed=self.config["seed"],
                             )
 
@@ -453,7 +452,6 @@ class SGLangBackend(BaseBackend):
                 model=self.config["served_model_name"],
                 messages=[{"role": "user", "content": "Hello"}],
                 temperature=0.0,
-                max_tokens=10,
                 seed=self.config["seed"],
             )
 
@@ -463,6 +461,7 @@ class SGLangBackend(BaseBackend):
                     f"[SGLANG]   Response: {warmup_response.choices[0].message.content[:50]}..."
                 )
             else:
+                print(f"[SGLANG] Full warmup response: {warmup_response}")
                 raise RuntimeError("External server returned empty response on warmup.")
         except Exception as e:
             raise RuntimeError(
@@ -671,8 +670,9 @@ class SGLangBackend(BaseBackend):
                     seed=self.config["seed"],
                 )
 
-                # Get generated text
-                generated_text = completion.choices[0].message.content
+                # Get generated text (fall back to reasoning_content if content is empty)
+                message = completion.choices[0].message
+                generated_text = message.content or getattr(message, 'reasoning_content', None)
 
                 # Validate response is not empty
                 if not generated_text:
@@ -712,8 +712,9 @@ class SGLangBackend(BaseBackend):
                     seed=self.config["seed"],
                 )
 
-                # Get generated text
-                generated_text = completion.choices[0].message.content
+                # Get generated text (fall back to reasoning_content if content is empty)
+                message = completion.choices[0].message
+                generated_text = message.content or getattr(message, 'reasoning_content', None)
 
                 # Validate response is not empty
                 if not generated_text:

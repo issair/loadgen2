@@ -371,7 +371,6 @@ requires-dist = [
     { name = "openai", specifier = ">=1.0.0" },
     { name = "orjson", specifier = ">=3.9.0" },
     { name = "pandas", specifier = ">=2.0.0" },
-    { name = "pandas", specifier = ">=2.3.3" },
     { name = "pybind11", marker = "extra == 'mlperf'" },
     { name = "tqdm", specifier = ">=4.65.0" },
     { name = "transformers", marker = "extra == 'tokenizer'", specifier = ">=4.36.0" },

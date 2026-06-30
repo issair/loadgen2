@@ -49,6 +49,8 @@ class SessionSUT(BaseSUT):
         poisson_seed: int = 0,
         poisson_lam: int = 10,
         poisson_pool_size: int = 1000,
+        round_from: int = 0,
+        round_to: int = 1,
         name: str = "SessionSUT",
     ) -> None:
         super().__init__(name)
@@ -76,6 +78,8 @@ class SessionSUT(BaseSUT):
             poisson_seed=poisson_seed,
             poisson_lam=poisson_lam,
             poisson_pool_size=poisson_pool_size,
+            round_from=round_from,
+            round_to=round_to,
         )
 
         self._loop: asyncio.AbstractEventLoop | None = None

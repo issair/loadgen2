@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import socket
 import time
 import uuid
 from collections import deque
@@ -62,10 +63,11 @@ class OpenAIBackend(BaseBackend):
         # Tokenizer (will be lazily loaded if available)
         self.tokenizer = None
 
-        # Configure logging to suppress httpx INFO logs
+        # Configure logging to suppress httpx/openai INFO logs
+        # (httpcore log level is controlled by run_session_mlperf.py for
+        #  TCP connection debugging)
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("openai").setLevel(logging.WARNING)
-        logging.getLogger("httpcore").setLevel(logging.WARNING)
 
         self._setup_environment()
 
@@ -560,6 +562,8 @@ class OpenAIBackend(BaseBackend):
         max_tokens: int,
         top_p: float,
         seed: int,
+        thinking: Any = None,
+        sid: Optional[str] = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Stream a chat completion using raw httpx SSE parsing.
 
@@ -569,6 +573,8 @@ class OpenAIBackend(BaseBackend):
             max_tokens: Maximum tokens to generate
             top_p: Nucleus sampling parameter
             seed: Random seed
+            thinking: Enable/disable reasoning mode (GLM / DeepSeek compatible)
+            sid: Session id, passed as X-Session-Id HTTP header
 
         Yields:
             StreamingChunk objects as tokens arrive
@@ -584,6 +590,11 @@ class OpenAIBackend(BaseBackend):
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
+        if sid:
+            import re
+            if os.getenv("MLPERF_SEND_SESSION_ID", "0") == "1":
+                sid = re.sub(r"[^a-zA-Z0-9_\-.]", "_", sid)
+                headers["session-id"] = sid
 
         messages, extra = self._build_messages(prompt)
         messages = self.fix_tool_call_arguments(messages)
@@ -599,11 +610,20 @@ class OpenAIBackend(BaseBackend):
             payload.update(extra)
 
         payload["stream"] = True
+        payload["model"] = self.config["model"]
         payload["stream_options"] = {"include_usage": True}
         if max_tokens:
             payload["max_tokens"] = max_tokens
             payload["max_completion_tokens"] = max_tokens
             payload["ignore_eos"] = True
+        else:
+            payload.pop("max_tokens", None)
+            payload.pop("max_completion_tokens", None)
+            payload.pop("ignore_eos", None)
+        if thinking is not None:
+            payload["thinking"] = thinking
+        else:
+            payload.pop("thinking", None)
 
         payload_bytes = orjson.dumps(payload)
         start = time.perf_counter()
@@ -618,7 +638,17 @@ class OpenAIBackend(BaseBackend):
                 write=None,
                 pool=None,
             )
-            self._httpx_client = httpx.AsyncClient(timeout=timeout_config)
+            transport = httpx.AsyncHTTPTransport(
+                socket_options=[
+                    (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+                    (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
+                    (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 30),
+                    (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
+                ]
+            )
+            self._httpx_client = httpx.AsyncClient(
+                transport=transport, timeout=timeout_config
+            )
 
         client = self._httpx_client
         async with client.stream(
@@ -724,6 +754,7 @@ class OpenAIBackend(BaseBackend):
         self,
         tokenized_prompts: Optional[List[List[int]]] = None,
         text_prompts: Optional[List[str]] = None,
+        sid: Optional[str] = None,
         **kwargs,
     ) -> List[AsyncIterator[StreamingChunk]]:
         """Generate responses with streaming.
@@ -734,6 +765,7 @@ class OpenAIBackend(BaseBackend):
         Args:
             tokenized_prompts: List of tokenized prompts
             text_prompts: List of text prompts (preferred)
+            sid: Session id, passed as X-Session-Id HTTP header
             **kwargs: Additional parameters
 
         Returns:
@@ -753,9 +785,10 @@ class OpenAIBackend(BaseBackend):
         max_tokens = self.config["max_tokens"]
         top_p = kwargs.get("top_p", self.config["top_p"])
         seed = kwargs.get("seed", self.config["seed"])
+        thinking = kwargs.get("thinking", self.config.get("thinking"))
 
         return [
-            self._stream_chat_completion(p, temperature, max_tokens, top_p, seed)
+            self._stream_chat_completion(p, temperature, max_tokens, top_p, seed, thinking, sid)
             for p in prompt_strings
         ]
 

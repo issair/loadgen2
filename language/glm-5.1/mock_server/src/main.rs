@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
+use axum::extract::DefaultBodyLimit;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use uuid::Uuid;
@@ -52,6 +53,24 @@ impl AppState {
             let _ = file.write_all(line_str.as_bytes()).await;
         }
     }
+}
+
+fn headers_to_json(headers: &HeaderMap) -> Value {
+    let mut map = serde_json::Map::new();
+    for (name, value) in headers.iter() {
+        let key = name.as_str().to_lowercase();
+        let val = value.to_str().unwrap_or("<binary>");
+        map.entry(key)
+            .and_modify(|e: &mut Value| {
+                if let Value::Array(arr) = e {
+                    arr.push(Value::String(val.to_string()));
+                } else {
+                    *e = Value::Array(vec![e.clone(), Value::String(val.to_string())]);
+                }
+            })
+            .or_insert_with(|| Value::String(val.to_string()));
+    }
+    Value::Object(map)
 }
 
 #[derive(Default)]
@@ -109,10 +128,46 @@ struct StreamOptions {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// Extract the textual content regardless of representation.
+    fn as_text(&self) -> String {
+        match self {
+            MessageContent::Text(s) => s.clone(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| p.text.as_deref())
+                .collect::<Vec<&str>>()
+                .join(""),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            MessageContent::Text(s) => s.is_empty(),
+            MessageContent::Parts(parts) => parts.iter().all(|p| p.text.as_deref().map_or(true, |t| t.is_empty())),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ContentPart {
+    #[serde(rename = "type")]
+    #[allow(dead_code)]
+    part_type: String,
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct Message {
     #[allow(dead_code)]
     role: String,
-    content: Option<String>,
+    content: Option<MessageContent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,9 +228,10 @@ struct ResponseMessage {
 fn extract_input(messages: &[Message]) -> String {
     messages
         .iter()
-        .filter_map(|m| m.content.as_deref())
+        .filter_map(|m| m.content.as_ref())
         .filter(|c| !c.is_empty())
-        .collect::<Vec<&str>>()
+        .map(|c| c.as_text())
+        .collect::<Vec<String>>()
         .join("\n")
 }
 
@@ -191,6 +247,7 @@ fn tokenize(text: &str, max_tokens: u32) -> Vec<String> {
 
 async fn chat_completions_nonstream(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
     state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -209,9 +266,12 @@ async fn chat_completions_nonstream(
         }
     };
 
-    state
-        .dump("request", &serde_json::to_value(&req).unwrap())
-        .await;
+    {
+        let mut dump_val = serde_json::Map::new();
+        dump_val.insert("body".into(), serde_json::to_value(&req).unwrap());
+        dump_val.insert("headers".into(), headers_to_json(&headers));
+        state.dump("request", &Value::Object(dump_val)).await;
+    }
 
     let input = extract_input(&req.messages);
     let prompt_tokens = input.chars().count() as u32;
@@ -247,10 +307,6 @@ async fn chat_completions_nonstream(
         },
     };
 
-    state
-        .dump("response", &serde_json::to_value(&resp).unwrap())
-        .await;
-
     state.stats.in_flight.fetch_sub(1, Ordering::Relaxed);
 
     (StatusCode::OK, Json(resp)).into_response()
@@ -258,15 +314,19 @@ async fn chat_completions_nonstream(
 
 async fn chat_completions_stream(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
     state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
     let permit = state.semaphore.clone().acquire_owned().await.unwrap();
     state.stats.in_flight.fetch_add(1, Ordering::Relaxed);
 
-    state
-        .dump("request", &serde_json::to_value(&req).unwrap())
-        .await;
+    {
+        let mut dump_val = serde_json::Map::new();
+        dump_val.insert("body".into(), serde_json::to_value(&req).unwrap());
+        dump_val.insert("headers".into(), headers_to_json(&headers));
+        state.dump("request", &Value::Object(dump_val)).await;
+    }
 
     let input = extract_input(&req.messages);
     let prompt_tokens = input.chars().count() as u32;
@@ -287,7 +347,6 @@ async fn chat_completions_stream(
         .map(|o| o.include_usage)
         .unwrap_or(true);
 
-    let state_for_dump = Arc::clone(&state);
     let token_delay_ms = state.token_delay_ms;
 
     // RAII guard: decrements in_flight when the stream is dropped,
@@ -317,9 +376,6 @@ async fn chat_completions_stream(
                 }],
                 usage: None,
             };
-            state_for_dump
-                .dump("stream_chunk", &serde_json::to_value(&chunk).unwrap())
-                .await;
             let data = serde_json::to_string(&chunk).unwrap();
             yield Ok::<_, axum::Error>(Event::default().data(data));
             if token_delay_ms > 0 {
@@ -348,9 +404,6 @@ async fn chat_completions_stream(
                 None
             },
         };
-        state_for_dump
-            .dump("stream_final_chunk", &serde_json::to_value(&final_chunk).unwrap())
-            .await;
         let data = serde_json::to_string(&final_chunk).unwrap();
         yield Ok::<_, axum::Error>(Event::default().data(data));
 
@@ -369,14 +422,15 @@ async fn health_handler() -> impl IntoResponse {
 
 async fn chat_completions_handler(
     state: State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
     if req.stream.unwrap_or(false) {
-        chat_completions_stream(state, Json(req))
+        chat_completions_stream(state, headers, Json(req))
             .await
             .into_response()
     } else {
-        chat_completions_nonstream(state, Json(req))
+        chat_completions_nonstream(state, headers, Json(req))
             .await
             .into_response()
     }
@@ -429,6 +483,7 @@ async fn main() {
         .route("/health", get(health_handler))
         .route("/chat/completions", post(chat_completions_handler))
         .route("/v1/chat/completions", post(chat_completions_handler))
+        .layer(DefaultBodyLimit::max(256 * 1024 * 1024))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

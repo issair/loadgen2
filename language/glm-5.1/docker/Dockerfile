@@ -31,7 +31,7 @@ RUN sed -i 's@deb.debian.org@mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.li
 # ------------------------------------------------------------------
 #  2. Install uv package manager
 # ------------------------------------------------------------------
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
 
 # ------------------------------------------------------------------
 #  3. Copy source code

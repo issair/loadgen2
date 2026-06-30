@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 # Configuration constants for GLM-5.1
 MAX_ISL = 8192  # max input sequence length for GLM
-MAX_OSL = int(os.environ.get("MLPERF_MAX_OSL", "8192"))  # max output sequence length
+MAX_OSL = int(os.environ.get("MLPERF_MAX_OSL", "0"))  # max output sequence length
 MAX_TEMPLATE_TOKS = 10
 MODEL_REVISION = "main"
 
@@ -32,6 +32,7 @@ BACKEND_REGISTRY = {
             "top_p": 1.0,
             "max_tokens": MAX_OSL,
             "seed": 42,
+            "thinking": None,  # None=not set, {"type": "enabled"/"disabled"} to control reasoning
             # Performance settings
             "max_concurrent_requests": 64,
             "max_retries": 3,
@@ -160,6 +161,12 @@ def get_backend_config(backend_name: Optional[str] = None) -> Dict[str, Any]:
         config["model"] = os.environ["OPENAI_MODEL"]
     if os.environ.get("OPENAI_API_KEY"):
         config["api_key"] = os.environ["OPENAI_API_KEY"]
+    if os.environ.get("OPENAI_THINKING") is not None:
+        raw = os.environ["OPENAI_THINKING"].strip().lower()
+        if raw in ("true", "enabled"):
+            config["thinking"] = {"type": "enabled"}
+        elif raw in ("false", "disabled"):
+            config["thinking"] = {"type": "disabled"}
 
     return config
 
